@@ -190,6 +190,36 @@ func (ctrl *PersistentVolumeController) enqueueWork(queue workqueue.Interface, o
 		klog.Errorf("failed to get key from object: %v", err)
 		return
 	}
+	switch obj.(type) {
+	case *v1.PersistentVolume:
+		volume, ok := obj.(*v1.PersistentVolume)
+		if !ok {
+			klog.Error("Failed to convert the enqueueWork obj into a PV")
+		}
+		var delTimeStampStr string
+		if volume.DeletionTimestamp != nil {
+			delTimeStampStr = volume.DeletionTimestamp.String()
+		} else {
+			delTimeStampStr = ""
+		}
+		klog.Infof("enqueueing PV objName %s\nPV:\nName: %s\nCreationTimeStamp: %s\nDeletionTimeStamp: %s\nResourceVersion"+
+			" :%s\nFinalizers: %+v\nPhase: %s\nAnnotations: %+v\n", objName, volume.Name, volume.CreationTimestamp.String(), delTimeStampStr, volume.ResourceVersion,
+			volume.Finalizers, volume.Status.Phase, volume.Annotations)
+	case *v1.PersistentVolumeClaim:
+		claim, ok := obj.(*v1.PersistentVolumeClaim)
+		if !ok {
+			klog.Error("Failed to convert enqueueWork obj into PVC")
+		}
+		var delTimeStampStr string
+		if claim.DeletionTimestamp != nil {
+			delTimeStampStr = claim.DeletionTimestamp.String()
+		} else {
+			delTimeStampStr = ""
+		}
+		klog.Infof("enqueueing PVC objName %s\nPVC:\nName: %s\nCreationTimeStamp: %s\nDeletionTimeStamp: %s\nResourceVersion"+
+			" :%s\nFinalizers: %+v\nPhase: %s\n", objName, claim.Name, claim.CreationTimestamp.String(), delTimeStampStr, claim.ResourceVersion,
+			claim.Finalizers, claim.Status.Phase)
+	}
 	klog.V(5).Infof("enqueued %q for sync", objName)
 	queue.Add(objName)
 }
@@ -232,7 +262,7 @@ func (ctrl *PersistentVolumeController) deleteVolume(volume *v1.PersistentVolume
 	if err := ctrl.volumes.store.Delete(volume); err != nil {
 		klog.Errorf("volume %q deletion encountered : %v", volume.Name, err)
 	} else {
-		klog.V(4).Infof("volume %q deleted", volume.Name)
+		klog.V(4).Infof("volume %q deleted from store.", volume.Name)
 	}
 	// record deletion metric if a deletion start timestamp is in the cache
 	// the following calls will be a no-op if there is nothing for this volume in the cache
@@ -362,6 +392,21 @@ func (ctrl *PersistentVolumeController) updateVolumeMigrationAnnotations(volume 
 	}
 	return newVol, nil
 
+}
+
+func (ctrl *PersistentVolumeController) updateRequestToDeleteVolumeAnnotations(volume *v1.PersistentVolume) (*v1.PersistentVolume, error) {
+	volumeClone := volume.DeepCopy()
+	metav1.SetMetaDataAnnotation(&volumeClone.ObjectMeta, pvutil.AnnRequestToDeleteVolume, "")
+	newVol, err := ctrl.kubeClient.CoreV1().PersistentVolumes().Update(context.TODO(), volumeClone, metav1.UpdateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("persistent Volume Controller failed to add request to delete volume annotations: %v", err)
+	}
+	// TODO: updating here may prevent processing of previous versions? figure out if this can be avoided.
+	/*_, err = ctrl.storeVolumeUpdate(newVol)
+	if err != nil {
+		return nil, fmt.Errorf("persistent Volume Controller failed to store the volume update: %v", err)
+	}*/
+	return newVol, nil
 }
 
 // updateMigrationAnnotations takes an Annotations map and checks for a

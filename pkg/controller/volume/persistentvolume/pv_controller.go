@@ -618,6 +618,17 @@ func (ctrl *PersistentVolumeController) syncVolume(volume *v1.PersistentVolume) 
 				return fmt.Errorf("Cannot convert object from volume cache to volume %q!?: %#v", claim.Spec.VolumeName, obj)
 			}
 			klog.V(4).Infof("synchronizing PersistentVolume[%s]: claim %s found: %s", volume.Name, claimrefToClaimKey(volume.Spec.ClaimRef), getClaimStatusForLogging(claim))
+			// Check if the PV has a deletion timestamp, if so, annotate the PV to indicate that the PV can be deleted
+			// from the underlying storage.
+			if volume.DeletionTimestamp!= nil && !metav1.HasAnnotation(volume.ObjectMeta, pvutil.AnnRequestToDeleteVolume) {
+				klog.Infof("synchronizing PersistentVolume[%s]: the volume was requested to be deleted but still" +
+					" it is still associated with the claim %s", volume.Name, claimrefToClaimKey(volume.Spec.ClaimRef))
+				_, err := ctrl.updateRequestToDeleteVolumeAnnotations(volume)
+				if err != nil {
+					klog.V(4).Infof("synchronizing PersistentVolume[%s]: failed to add the delete volume annotation", volume.Name)
+				}
+				klog.Infof("successfully added annotation to indicate the volume is to be deleted.")
+			}
 		}
 		if claim != nil && claim.UID != volume.Spec.ClaimRef.UID {
 			// The claim that the PV was pointing to was deleted, and another
@@ -1110,6 +1121,7 @@ func (ctrl *PersistentVolumeController) reclaimVolume(volume *v1.PersistentVolum
 		// create a start timestamp entry in cache for deletion operation if no one exists with
 		// key = volume.Name, pluginName = provisionerName, operation = "delete"
 		ctrl.operationTimestamps.AddIfNotExist(volume.Name, ctrl.getProvisionerNameFromVolume(volume), "delete")
+		klog.Infof("Scheduling delete volume operation with name: %s", opName)
 		ctrl.scheduleOperation(opName, func() error {
 			_, err := ctrl.deleteVolumeOperation(volume)
 			if err != nil {
@@ -1230,20 +1242,40 @@ func (ctrl *PersistentVolumeController) recycleVolumeOperation(volume *v1.Persis
 // goroutine and already has all necessary locks.
 func (ctrl *PersistentVolumeController) deleteVolumeOperation(volume *v1.PersistentVolume) (string, error) {
 	klog.V(4).Infof("deleteVolumeOperation [%s] started", volume.Name)
-
+	var requestToDeleteAnn bool
 	// This method may have been waiting for a volume lock for some time.
 	// Previous deleteVolumeOperation might just have saved an updated version, so
 	// read current volume state now.
 	newVolume, err := ctrl.kubeClient.CoreV1().PersistentVolumes().Get(context.TODO(), volume.Name, metav1.GetOptions{})
 	if err != nil {
 		klog.V(3).Infof("error reading persistent volume %q: %v", volume.Name, err)
-		return "", nil
+		if !apierrors.IsNotFound(err) {
+			return "", nil
+		} else {
+			// Check if the volume is annotated with explicit request to delete.
+			// In this case due to race with the pv protection controller, it may not be possible to  retrieve the latest
+			// state. However, the annotation clearly indicates the volume deletion can proceed.
+			requestToDeleteAnn = metav1.HasAnnotation(volume.ObjectMeta, pvutil.AnnRequestToDeleteVolume)
+			if !requestToDeleteAnn {
+				klog.Infof("no request to delete annotation found on the volume %s", volume.Name)
+				// Does not have the annotation, throw the NotFound error.
+				return "", err
+			} else {
+				klog.Infof("request to delete annotation found on the volume %s", volume.Name)
+				newVolume = volume
+			}
+		}
+	} else {
+		klog.Infof("No errors returned while retrieving the PV %s", volume.Name)
 	}
 
-	if newVolume.GetDeletionTimestamp() != nil {
+	// Note: no need to check for deletion timestamp, the schedule operation ensures that duplicate delete
+	// are not processed.
+/*	if newVolume.GetDeletionTimestamp() != nil {
 		klog.V(3).Infof("Volume %q is already being deleted", volume.Name)
 		return "", nil
-	}
+	}*/
+	klog.Infof("Checking if the volume %s is released", volume.Name)
 	needsReclaim, err := ctrl.isVolumeReleased(newVolume)
 	if err != nil {
 		klog.V(3).Infof("error reading claim for volume %q: %v", volume.Name, err)
@@ -1278,18 +1310,21 @@ func (ctrl *PersistentVolumeController) deleteVolumeOperation(volume *v1.Persist
 	}
 	if !deleted {
 		// The volume waits for deletion by an external plugin. Do nothing.
+		klog.Infof("doDeleteVolume returned a false while looking up for plugin, returning now.")
 		return pluginName, nil
 	}
 
 	klog.V(4).Infof("deleteVolumeOperation [%s]: success", volume.Name)
 	// Delete the volume
-	if err = ctrl.kubeClient.CoreV1().PersistentVolumes().Delete(context.TODO(), volume.Name, metav1.DeleteOptions{}); err != nil {
-		// Oops, could not delete the volume and therefore the controller will
-		// try to delete the volume again on next update. We _could_ maintain a
-		// cache of "recently deleted volumes" and avoid unnecessary deletion,
-		// this is left out as future optimization.
-		klog.V(3).Infof("failed to delete volume %q from database: %v", volume.Name, err)
-		return pluginName, nil
+	if !requestToDeleteAnn {
+		if err = ctrl.kubeClient.CoreV1().PersistentVolumes().Delete(context.TODO(), volume.Name, metav1.DeleteOptions{}); err != nil {
+			// Oops, could not delete the volume and therefore the controller will
+			// try to delete the volume again on next update. We _could_ maintain a
+			// cache of "recently deleted volumes" and avoid unnecessary deletion,
+			// this is left out as future optimization.
+			klog.V(3).Infof("failed to delete volume %q from database: %v", volume.Name, err)
+			return pluginName, nil
+		}
 	}
 	return pluginName, nil
 }
@@ -1300,6 +1335,7 @@ func (ctrl *PersistentVolumeController) deleteVolumeOperation(volume *v1.Persist
 func (ctrl *PersistentVolumeController) isVolumeReleased(volume *v1.PersistentVolume) (bool, error) {
 	// A volume needs reclaim if it has ClaimRef and appropriate claim does not
 	// exist.
+	klog.Infof("isVolumeReleased start for volume: %s", volume.Name)
 	if volume.Spec.ClaimRef == nil {
 		klog.V(4).Infof("isVolumeReleased[%s]: ClaimRef is nil", volume.Name)
 		return false, nil
@@ -1318,6 +1354,7 @@ func (ctrl *PersistentVolumeController) isVolumeReleased(volume *v1.PersistentVo
 		return false, err
 	}
 	if !found {
+		klog.Infof("isVolumeReleased: The calim %s for the volume %s was not found",claimName, volume.Name)
 		// Fall through with claim = nil
 	} else {
 		var ok bool

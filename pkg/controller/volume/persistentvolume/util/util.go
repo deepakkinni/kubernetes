@@ -75,6 +75,10 @@ const (
 	// provisioned. Its value is name of volume plugin that is supposed to provision
 	// a volume for this PVC.
 	AnnStorageProvisioner = "volume.beta.kubernetes.io/storage-provisioner"
+
+	// AnnRequestToDeleteVolume annotation is added to the PV after it is moved into "Released" state.
+	// This indicates to the driver that the volume needs to be deleted from the underlying storage.
+	AnnRequestToDeleteVolume = "pv.kubernetes.io/request-to-delete-volume"
 )
 
 // IsDelayBindingProvisioning checks if claim provisioning with selected-node annotation
