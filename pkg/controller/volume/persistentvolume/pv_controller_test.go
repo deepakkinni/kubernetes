@@ -689,6 +689,7 @@ func TestUpdateFinalizer(t *testing.T) {
 		expVolumeFinalizers []string
 		expModified         bool
 		migratedDriverGates []featuregate.Feature
+		disabledDriverGates []featuregate.Feature
 	}{
 		{
 			// Represents a volume provisioned through external-provisioner
@@ -698,6 +699,7 @@ func TestUpdateFinalizer(t *testing.T) {
 			expVolumeFinalizers: []string{pvutil.PVDeletionProtectionFinalizer},
 			expModified:         false,
 			migratedDriverGates: []featuregate.Feature{},
+			disabledDriverGates: []featuregate.Feature{features.CSIMigrationGCE},
 		},
 		{
 			// Represents a volume provisioned through external-provisioner but the external-provisioner has
@@ -708,6 +710,7 @@ func TestUpdateFinalizer(t *testing.T) {
 			expVolumeFinalizers: nil,
 			expModified:         false,
 			migratedDriverGates: []featuregate.Feature{},
+			disabledDriverGates: []featuregate.Feature{features.CSIMigrationGCE},
 		},
 		{
 			// Represents an in-tree volume that has the migrated-to annotation but the external-provisioner is
@@ -720,6 +723,7 @@ func TestUpdateFinalizer(t *testing.T) {
 			expVolumeFinalizers: []string{customFinalizer},
 			expModified:         true,
 			migratedDriverGates: []featuregate.Feature{},
+			disabledDriverGates: []featuregate.Feature{features.CSIMigrationGCE},
 		},
 		{
 			name:                "13-4 migration was disabled but still has migrated-to annotation, volume has no finalizers",
@@ -728,6 +732,7 @@ func TestUpdateFinalizer(t *testing.T) {
 			expVolumeFinalizers: nil,
 			expModified:         true,
 			migratedDriverGates: []featuregate.Feature{},
+			disabledDriverGates: []featuregate.Feature{features.CSIMigrationGCE},
 		},
 		{
 			// Represents roll back scenario where the external-provisioner has added the pv deletion protection
@@ -739,6 +744,7 @@ func TestUpdateFinalizer(t *testing.T) {
 			expVolumeFinalizers: nil,
 			expModified:         true,
 			migratedDriverGates: []featuregate.Feature{},
+			disabledDriverGates: []featuregate.Feature{features.CSIMigrationGCE},
 		},
 		{
 			// Represents roll-back of csi-migration as 13-5, here there are multiple finalizers, only the pv deletion
@@ -749,6 +755,7 @@ func TestUpdateFinalizer(t *testing.T) {
 			expVolumeFinalizers: []string{customFinalizer},
 			expModified:         true,
 			migratedDriverGates: []featuregate.Feature{},
+			disabledDriverGates: []featuregate.Feature{features.CSIMigrationGCE},
 		},
 		{
 			// csi migration is enabled, the pv controller should not delete the finalizer added by the
@@ -769,6 +776,7 @@ func TestUpdateFinalizer(t *testing.T) {
 			expVolumeFinalizers: nil,
 			expModified:         true,
 			migratedDriverGates: []featuregate.Feature{features.CSIMigration},
+			disabledDriverGates: []featuregate.Feature{features.CSIMigrationGCE},
 		},
 		{
 			// same as 13-8 but multiple finalizers exists, only the pv deletion protection finalizer needs to be removed.
@@ -778,6 +786,7 @@ func TestUpdateFinalizer(t *testing.T) {
 			expVolumeFinalizers: []string{customFinalizer},
 			expModified:         true,
 			migratedDriverGates: []featuregate.Feature{features.CSIMigration},
+			disabledDriverGates: []featuregate.Feature{features.CSIMigrationGCE},
 		},
 		{
 			// corner error case.
@@ -814,6 +823,9 @@ func TestUpdateFinalizer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, f := range tc.migratedDriverGates {
 				defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, f, true)()
+			}
+			for _, f := range tc.disabledDriverGates {
+				defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, f, false)()
 			}
 			if tc.volumeAnnotations != nil {
 				ann := tc.volumeAnnotations
