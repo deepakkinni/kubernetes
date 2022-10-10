@@ -541,6 +541,21 @@ func (p *provisioningTestSuite) DefineTests(driver storageframework.TestDriver, 
 
 		l.testCase.TestDynamicProvisioning()
 	})
+
+	ginkgo.It("[Feature:HonorPVReclaimPolicy] delete pv prior", func() {
+		if len(dInfo.InTreePluginName) == 0 {
+			e2eskipper.Skipf("HonorPVReclaimPolicy feature only works with In-Tree volume drivers - skipping")
+		}
+		if pattern.VolMode == v1.PersistentVolumeBlock {
+			e2eskipper.Skipf("Test for Block volumes is not implemented - skipping")
+		}
+		init()
+		defer cleanup()
+		_, clearProvisionedStorageClass := SetupStorageClass(l.testCase.Client, l.testCase.Class)
+		defer clearProvisionedStorageClass()
+
+		l.testCase.TestVolumeFinalizers()
+	})
 }
 
 // SetupStorageClass ensures that a StorageClass from a spec exists, if the StorageClass already exists
@@ -655,6 +670,38 @@ func (t StorageClassTest) TestDynamicProvisioning() *v1.PersistentVolume {
 	}
 
 	return pv
+}
+
+// TestVolumeFinalizers tests
+func (t StorageClassTest) TestVolumeFinalizers() {
+	var err error
+	client := t.Client
+	gomega.Expect(client).NotTo(gomega.BeNil(), "StorageClassTest.Client is required")
+	claim := t.Claim
+	gomega.Expect(claim).NotTo(gomega.BeNil(), "StorageClassTest.Claim is required")
+	gomega.Expect(claim.GenerateName).NotTo(gomega.BeEmpty(), "StorageClassTest.Claim.GenerateName must not be empty")
+	class := t.Class
+	gomega.Expect(class).NotTo(gomega.BeNil(), "StorageClassTest.Class is required")
+	class, err = client.StorageV1().StorageClasses().Get(context.TODO(), class.Name, metav1.GetOptions{})
+	framework.ExpectNoError(err, "StorageClass.Class "+class.Name+" couldn't be fetched from the cluster")
+
+	ginkgo.By(fmt.Sprintf("creating claim=%+v", claim))
+	claim, err = client.CoreV1().PersistentVolumeClaims(claim.Namespace).Create(context.TODO(), claim, metav1.CreateOptions{})
+	framework.ExpectNoError(err)
+
+	pv := t.checkProvisioning(client, claim, class)
+
+	finalizers := pv.Finalizers
+	found := false
+	for _, finalizer := range finalizers {
+		if finalizer == "kubernetes.io/pv-controller" {
+			found = true
+		}
+	}
+	if !found {
+		framework.Failf("The PV does not have the finalizer")
+	}
+	// TODO: exercise PV deletion, verify PV still exists, delete PVC, verify PV is removed
 }
 
 // getBoundPV returns a PV details.
